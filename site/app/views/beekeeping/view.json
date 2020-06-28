@@ -1,9 +1,8 @@
 {
   "title": "Beekeeping",
-  "description": "Introduction to the basics a beekeeper should know and a collection of personal experiences. Learn how to do hive inspections and maintain the health of your bees.",
-  "logoUrl": "/beekeeping/beekeeping-logo.jpeg",
+  "description": "Introduction to the basics of beekeeping. Learn how to do hive inspections and to maintain the health of your bees.",
+  "logoUrl": "/beekeeping/beekeeping-logo.jpg",
   "tags": ["beekeeping"],
-  "toolbarBgColor": "#FFC107",
   "exclude": [
     ".*-about$",
     "^lang-.*"
