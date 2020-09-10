@@ -61,6 +61,19 @@ func isItalic(hn *html.Node) bool {
 		hn.DataAtom == atom.I
 }
 
+// This is different to calling isBold and isItalic seperately as we must look
+// up an extra level in the tree
+func isBoldAndItalic(hn *html.Node) bool {
+	if hn.Parent == nil || hn.Parent.Parent == nil {
+		return false
+	}
+	if hn.Type == html.TextNode {
+		hn = hn.Parent
+	}
+	return (isItalic(hn) && isBold(hn.Parent)) || (isItalic(hn.Parent) && isBold(hn))
+
+}
+
 func isConsole(hn *html.Node) bool {
 	if hn.Type == html.TextNode {
 		hn = hn.Parent
@@ -77,6 +90,23 @@ func isCode(hn *html.Node) bool {
 
 func isButton(hn *html.Node) bool {
 	return hn.DataAtom == atom.Button
+}
+
+func isAside(hn *html.Node) bool {
+	return hn.DataAtom == atom.Aside
+}
+
+func isNewAside(hn *html.Node) bool {
+	if hn.FirstChild == nil ||
+	   hn.FirstChild.NextSibling == nil ||
+	   hn.FirstChild.NextSibling.FirstChild == nil {
+		return false
+	}
+
+	bq := hn.DataAtom == atom.Blockquote
+	apn := strings.HasPrefix(strings.ToLower(hn.FirstChild.NextSibling.FirstChild.Data), "aside positive") ||
+	       strings.HasPrefix(strings.ToLower(hn.FirstChild.NextSibling.FirstChild.Data), "aside negative")
+	return bq && apn
 }
 
 func isInfobox(hn *html.Node) bool {

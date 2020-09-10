@@ -37,7 +37,7 @@ func MD(env string, nodes ...types.Node) (string, error) {
 
 // WriteMD does the same as MD but outputs rendered markup to w.
 func WriteMD(w io.Writer, env string, nodes ...types.Node) error {
-	mw := mdWriter{w: w, env: env}
+	mw := mdWriter{w: w, env: env, Prefix: ""}
 	return mw.write(nodes...)
 }
 
@@ -46,6 +46,7 @@ type mdWriter struct {
 	env       string    // target environment
 	err       error     // error during any writeXxx methods
 	lineStart bool
+	Prefix    string    // prefix for e.g. blockquote content
 }
 
 func (mw *mdWriter) writeBytes(b []byte) {
@@ -57,6 +58,9 @@ func (mw *mdWriter) writeBytes(b []byte) {
 }
 
 func (mw *mdWriter) writeString(s string) {
+	if mw.lineStart {
+		s = mw.Prefix + s
+	}
 	mw.writeBytes([]byte(s))
 }
 
@@ -114,8 +118,8 @@ func (mw *mdWriter) write(nodes ...types.Node) error {
 		//	mw.survey(n)
 		case *types.HeaderNode:
 			mw.header(n)
-			//case *types.YouTubeNode:
-			//	mw.youtube(n)
+		case *types.YouTubeNode:
+			mw.youtube(n)
 		}
 		if mw.err != nil {
 			return mw.err
@@ -125,25 +129,42 @@ func (mw *mdWriter) write(nodes ...types.Node) error {
 }
 
 func (mw *mdWriter) text(n *types.TextNode) {
-	if n.Bold {
-		mw.writeString("**")
+	t := strings.TrimSpace(n.Value)
+	tl := len([]rune(t))
+	nl := len([]rune(n.Value))
+	ls := nl - len([]rune(strings.TrimLeft(n.Value, " ")))
+	// Don't just copy above and TrimRight instead of TrimLeft to avoid " " counting as 1
+	// left space and 1 right space. Instead, number of right spaces is
+	// length of whole string - length of string with spaces trimmed - number of left spaces.
+	rs := nl - tl - ls
+
+	mw.writeString(strings.Repeat(" ", ls))
+	if tl > 0 {
+		if n.Bold {
+			mw.writeString("**")
+		}
+		if n.Italic {
+			mw.writeString("*")
+		}
+		if n.Code {
+			mw.writeString("`")
+		}
 	}
-	if n.Italic {
-		mw.writeString(" *")
+
+	mw.writeString(t)
+
+	if tl > 0 {
+		if n.Code {
+			mw.writeString("`")
+		}
+		if n.Italic {
+			mw.writeString("*")
+		}
+		if n.Bold {
+			mw.writeString("**")
+		}
 	}
-	if n.Code {
-		mw.writeString("`")
-	}
-	mw.writeString(n.Value)
-	if n.Code {
-		mw.writeString("`")
-	}
-	if n.Italic {
-		mw.writeString("* ")
-	}
-	if n.Bold {
-		mw.writeString("**")
-	}
+	mw.writeString(strings.Repeat(" ", rs))
 }
 
 func (mw *mdWriter) image(n *types.ImageNode) {
@@ -172,17 +193,21 @@ func (mw *mdWriter) image(n *types.ImageNode) {
 func (mw *mdWriter) url(n *types.URLNode) {
 	mw.space()
 	if n.URL != "" {
+		// Look-ahead for button syntax.
+		if _, ok := n.Content.Nodes[0].(*types.ButtonNode); ok {
+			mw.writeString("<button>")
+		}
 		mw.writeString("[")
 	}
-	for _, cn := range n.Content.Nodes {
-		if t, ok := cn.(*types.TextNode); ok {
-			mw.writeString(t.Value)
-		}
-	}
+	mw.write(n.Content.Nodes...)
 	if n.URL != "" {
 		mw.writeString("](")
 		mw.writeString(n.URL)
 		mw.writeString(")")
+		if _, ok := n.Content.Nodes[0].(*types.ButtonNode); ok {
+			// Look-ahead for button syntax.
+			mw.writeString("</button>")
+		}
 	}
 }
 
@@ -224,7 +249,9 @@ func (mw *mdWriter) list(n *types.ListNode) {
 }
 
 func (mw *mdWriter) itemsList(n *types.ItemsListNode) {
-	mw.newBlock()
+	if n.Block() == true {
+		mw.newBlock()
+	}
 	for i, item := range n.Items {
 		s := "* "
 		if n.Type() == types.NodeItemsList && n.Start > 0 {
@@ -239,18 +266,25 @@ func (mw *mdWriter) itemsList(n *types.ItemsListNode) {
 }
 
 func (mw *mdWriter) infobox(n *types.InfoboxNode) {
-	// TODO: This should use the "detail item" syntax so that it can be pure MD and not HTML
-	// kind
-	// : <content>
-	//
-	// The main issue is that when you do write(n.Content.Nodes...) it always adds two newlines
-	// at the beginning.
+	// InfoBoxes are comprised of a ListNode with the contents of the InfoBox. 
+	// Writing the ListNode directly results in extra newlines in the md output
+	// which breaks the formatting. So instead, write the ListNode's children 
+	// directly and don't write the ListNode itself.
 	mw.newBlock()
-	mw.writeString(`<aside class="`)
-	mw.writeString(string(n.Kind))
-	mw.writeString(`">`)
-	mw.write(n.Content.Nodes...)
-	mw.writeString("</aside>")
+	k := "aside positive"
+	if n.Kind == types.InfoboxNegative {
+		k = "aside negative"
+	}
+	mw.Prefix = "> "
+	mw.writeString(k)
+	mw.writeString("\n")
+
+	for _, cn := range n.Content.Nodes {
+		cn.MutateBlock(false)
+		mw.write(cn)
+	}
+	
+	mw.Prefix = ""
 }
 
 func (mw *mdWriter) header(n *types.HeaderNode) {
@@ -261,4 +295,9 @@ func (mw *mdWriter) header(n *types.HeaderNode) {
 	if !mw.lineStart {
 		mw.writeBytes(newLine)
 	}
+}
+
+func (mw *mdWriter) youtube(n *types.YouTubeNode) {
+	mw.newBlock()
+	mw.writeString(fmt.Sprintf(`<video id="%s"></video>`, n.VideoID))
 }
