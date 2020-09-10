@@ -284,8 +284,8 @@ func finalizeStep(s *types.Step) {
 	}
 	s.Tags = util.Unique(s.Tags)
 	sort.Strings(s.Tags)
-	s.Content.Nodes = blockNodes(s.Content.Nodes)
-	s.Content.Nodes = compactNodes(s.Content.Nodes)
+	s.Content.Nodes = parser.BlockNodes(s.Content.Nodes)
+	s.Content.Nodes = parser.CompactNodes(s.Content.Nodes)
 }
 
 // parseTop parses nodes tree starting at, and including, ds.cur.
@@ -300,7 +300,7 @@ func parseTop(ds *docState) {
 	ds.push(nil)
 	nn := parseSubtree(ds)
 	ds.pop()
-	ds.appendNodes(compactNodes(nn)...)
+	ds.appendNodes(parser.CompactNodes(nn)...)
 }
 
 // parseSubtree parses children of root recursively.
@@ -331,7 +331,7 @@ func parseSubtree(ds *docState) []types.Node {
 func parseNode(ds *docState) (types.Node, bool) {
 	// we have \n end of line nodes after each tag from the blackfriday parser.
 	// We just want to ignore them as it makes previous node detection fuzzy.
-	if ds.cur.Type == html.TextNode && strings.TrimSpace(ds.cur.Data) == "" {
+	if ds.cur.Type == html.TextNode && ds.cur.Data == "\n" {
 		return nil, true
 	}
 	switch {
@@ -354,6 +354,10 @@ func parseNode(ds *docState) (types.Node, bool) {
 		return code(ds, true), true
 	case isCode(ds.cur):
 		return code(ds, false), true
+	case isAside(ds.cur):
+		return aside(ds), true
+	case isNewAside(ds.cur):
+		return newAside(ds), true
 	case isInfobox(ds.cur):
 		return infobox(ds), true
 	case isSurvey(ds.cur):
@@ -535,6 +539,49 @@ func header(ds *docState) types.Node {
 	return n
 }
 
+// aside produces an infobox.
+func aside(ds *docState) types.Node {
+	kind := types.InfoboxPositive
+	for _, v := range ds.cur.Attr {
+		// If class "negative" is given, set the infobox type.
+		if v.Key == "class" && v.Val == "negative" {
+			kind = types.InfoboxNegative
+		}
+	}
+
+	ds.push(nil)
+	nn := parseSubtree(ds)
+	nn = parser.BlockNodes(nn)
+	nn = parser.CompactNodes(nn)
+	ds.pop()
+	if len(nn) == 0 {
+		return nil
+	}
+	return types.NewInfoboxNode(kind, nn...)
+}
+
+// new style aside, to produce an infobox
+func newAside(ds *docState) types.Node {
+	kind := types.InfoboxPositive
+	s := ds.cur.FirstChild.NextSibling.FirstChild.Data
+	if strings.HasPrefix(s, "aside negative") {
+		ds.cur.FirstChild.NextSibling.FirstChild.Data = strings.TrimPrefix(s, "aside negative")
+		kind = types.InfoboxNegative
+	} else {
+		ds.cur.FirstChild.NextSibling.FirstChild.Data = strings.TrimPrefix(s, "aside positive")
+	}
+
+	ds.push(nil)
+	nn := parseSubtree(ds)
+	nn = parser.BlockNodes(nn)
+	nn = parser.CompactNodes(nn)
+	ds.pop()
+	if len(nn) == 0 {
+		return nil
+	}
+	return types.NewInfoboxNode(kind, nn...)
+}
+
 // infobox doesn't have a block parent.
 func infobox(ds *docState) types.Node {
 	negativeInfoBox := isInfoboxNegative(ds.cur)
@@ -542,8 +589,8 @@ func infobox(ds *docState) types.Node {
 	ds.cur = ds.cur.NextSibling.NextSibling
 	ds.push(nil)
 	nn := parseSubtree(ds)
-	nn = blockNodes(nn)
-	nn = compactNodes(nn)
+	nn = parser.BlockNodes(nn)
+	nn = parser.CompactNodes(nn)
 	ds.pop()
 	if len(nn) == 0 {
 		return nil
@@ -573,14 +620,20 @@ func table(ds *docState) types.Node {
 
 func tableRow(ds *docState) []*types.GridCell {
 	var row []*types.GridCell
-	for td := findAtom(ds.cur, atom.Td); td != nil; td = td.NextSibling {
-		if td.DataAtom != atom.Td {
+	firstChild := findAtom(ds.cur, atom.Td)
+	// If there is no Td child found, could be table header so look for Th
+	if firstChild == nil {
+		firstChild = findAtom(ds.cur, atom.Th)
+	}
+
+	for td := firstChild; td != nil; td = td.NextSibling {
+		if td.DataAtom != atom.Td && td.DataAtom != atom.Th {
 			continue
 		}
 		ds.push(td)
 		nn := parseSubtree(ds)
-		nn = blockNodes(nn)
-		nn = compactNodes(nn)
+		nn = parser.BlockNodes(nn)
+		nn = parser.CompactNodes(nn)
 		ds.pop()
 		if len(nn) == 0 {
 			continue
@@ -676,7 +729,7 @@ func list(ds *docState) types.Node {
 		}
 		ds.push(hn)
 		nn := parseSubtree(ds)
-		nn = compactNodes(nn)
+		nn = parser.CompactNodes(nn)
 		ds.pop()
 		if len(nn) > 0 {
 			list.NewItem(nn...)
@@ -815,27 +868,26 @@ func button(ds *docState) types.Node {
 func link(ds *docState) types.Node {
 	href := nodeAttr(ds.cur, "href")
 
-	text := stringifyNode(ds.cur, false)
-	if strings.TrimSpace(text) == "" {
-		return nil
+	ds.push(nil)
+	parsedChildNodes := parseSubtree(ds)
+	ds.pop()
+
+	// Check outside styles
+	outsideBold := isBold(ds.cur.Parent)
+	outsideItalic := isItalic(ds.cur.Parent)
+	if isBoldAndItalic(ds.cur.Parent) {
+		outsideBold = true
+		outsideItalic = true
+	}
+	// Apply outside styles to inside parsed (text) nodes
+	for _, node := range parsedChildNodes {
+		if textNode, ok := node.(*types.TextNode); ok {
+			textNode.Bold = textNode.Bold || outsideBold
+			textNode.Italic = textNode.Italic || outsideItalic
+		}
 	}
 
-	t := types.NewTextNode(text)
-	if isBold(ds.cur.Parent) {
-		t.Bold = true
-	}
-	if isItalic(ds.cur.Parent) {
-		t.Italic = true
-	}
-	if isCode(ds.cur.Parent) {
-		t.Code = true
-	}
-	if href == "" || href[0] == '#' {
-		t.MutateBlock(findBlockParent(ds.cur))
-		return t
-	}
-
-	n := types.NewURLNode(href, t)
+	n := types.NewURLNode(href, parsedChildNodes...)
 	n.Name = nodeAttr(ds.cur, "name")
 	if v := nodeAttr(ds.cur, "target"); v != "" {
 		n.Target = v
@@ -849,6 +901,11 @@ func link(ds *docState) types.Node {
 func text(ds *docState) types.Node {
 	bold := isBold(ds.cur)
 	italic := isItalic(ds.cur)
+	// We must call this to look up an extra level in the node tree to obtain both styles
+	if isBoldAndItalic(ds.cur) {
+		bold = true
+		italic = true
+	}
 	code := isCode(ds.cur) || isConsole(ds.cur)
 
 	// TODO: verify whether this actually does anything
